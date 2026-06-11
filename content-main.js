@@ -13,8 +13,10 @@
     scaleY: 0.8,
     offsetY: 1.1,
     planeZ: -0.6,
+    depthScale: 1.5, // world-z (m) -> z reach; 0 disables depth (flat plane)
     mirror: true,
     smoothing: 0.4,
+    jcHitThresh: 700, // deg/s angular-velocity spike that counts as a punch/slice
     log: false,
   };
   const CFG = { ...DEFAULTS };
@@ -28,6 +30,11 @@
     poseCount: 0,
     calibrating: false,
     calib: null,
+    // ---- Joy-Con ----
+    jcEnabled: false,                       // write orientation to entities
+    jcRecenter: { Left: null, Right: null },// inverse-of-reference offset quat
+    jcLastHit: { Left: 0, Right: 0 },       // debounce timestamps
+    jc: { Left: null, Right: null },        // latest controller snapshot (status)
   };
 
   // Desired TOTAL world travel that a full comfortable sweep should map to.
@@ -37,7 +44,7 @@
 
   // ---- persistence (page-origin localStorage; fine in a real extension) ----
   const LS_KEY = '__mr_cfg_v1';
-  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','mirror','smoothing'];
+  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','depthScale','mirror','smoothing','jcHitThresh'];
   function persist() {
     try {
       const o = {};
@@ -123,7 +130,13 @@
     const x = (nx - 0.5) * CFG.scaleX;
     const y = (0.5 - ny) * CFG.scaleY + CFG.offsetY;
     let z = CFG.planeZ;
-    if (hand.wrist && hand.indexMcp) {
+    if (Number.isFinite(hand.wz)) {
+      // Real depth: PoseLandmarker worldLandmarks wrist z (metres, hip-origin).
+      // Reaching toward the camera makes wz more negative, so -wz grows as you
+      // punch forward; depthScale maps that to z reach off the neutral plane.
+      z = CFG.planeZ + (-hand.wz) * CFG.depthScale;
+    } else if (hand.wrist && hand.indexMcp) {
+      // Fallback only if worldLandmarks are absent: fake depth from hand size.
       const span = Math.hypot(hand.wrist.x - hand.indexMcp.x, hand.wrist.y - hand.indexMcp.y);
       z = CFG.planeZ + (span - 0.12) * 1.5;
     }
@@ -154,6 +167,62 @@
     }
   }
   window.addEventListener('moonrider:pose', onPose);
+
+  // ---- JOY-CON PATH -------------------------------------------------------
+  // Position stays with the camera; the Joy-Con owns orientation (object3D.
+  // quaternion) and hit timing (angular-velocity spike). L/R are separate HID
+  // devices, so sides never swap.
+  const quatConj = (q) => ({ x: -q.x, y: -q.y, z: -q.z, w: q.w });
+  function quatMul(a, b) {
+    return {
+      x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+      z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+      w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+  }
+  function applyRotation(side, q) {
+    const el = getTarget(side);
+    if (!el || !el.object3D) return false;
+    const off = state.jcRecenter[side];
+    const r = off ? quatMul(off, q) : q; // relative to the re-center reference
+    if (![r.x, r.y, r.z, r.w].every(Number.isFinite)) return false;
+    el.object3D.quaternion.set(r.x, r.y, r.z, r.w);
+    return true;
+  }
+  function onJoycon(e) {
+    const c = e.detail;
+    if (!c || !c.side) return;
+    state.jc[c.side] = c;
+    if (!state.jcEnabled) return;
+    applyRotation(c.side, c.q);
+    // Rising-edge angular-velocity spike = a swing. Debounce so one swing = one hit.
+    const now = performance.now();
+    if (c.gyroMag >= CFG.jcHitThresh && now - state.jcLastHit[c.side] > 180) {
+      state.jcLastHit[c.side] = now;
+      onHit(c.side, c.gyroMag);
+    }
+    if (CFG.log) console.log('[__mr] joycon', c.side, 'gyro', Math.round(c.gyroMag));
+  }
+  function onHit(side, gyroMag) {
+    // Ask the popup to buzz the matching Joy-Con (bridge forwards this).
+    window.dispatchEvent(new CustomEvent('moonrider:rumble', { detail: { side } }));
+    if (CFG.log) console.log('[__mr] HIT', side, Math.round(gyroMag), '°/s');
+  }
+  window.addEventListener('moonrider:joycon', onJoycon);
+
+  function jcStart() { state.jcEnabled = true; syncPanel(); }
+  function jcStop() { state.jcEnabled = false; syncPanel(); }
+  // Capture the current pose of each connected Joy-Con as "forward" — folds out
+  // the gravity/yaw frame difference so the controllers point where you expect.
+  function jcRecenter(side) {
+    const sides = side ? [side] : ['Left', 'Right'];
+    for (const s of sides) {
+      const c = state.jc[s];
+      if (c && c.q) state.jcRecenter[s] = quatConj(c.q);
+    }
+    if (els.jcst) els.jcst.textContent = '已重設朝向基準 ✓';
+  }
 
   function poseStart() { state.poseEnabled = true; syncPanel(); }
   function poseStop() { state.poseEnabled = false; syncPanel(); }
@@ -256,6 +325,12 @@
       <div class="hint">相機由工具列圖示開啟。此處控制是否把手勢套到控制器。</div>
     </div>
     <div class="sec">
+      <h4>Joy-Con (rotation)</h4>
+      <div class="btns"><button class="toggle" id="jc">Apply rotation</button><button class="s2" id="jcc">Re-center</button></div>
+      <div class="row"><label>hit °/s</label><input type="range" id="jh" min="200" max="2000" step="50"><span class="v" id="jhv"></span></div>
+      <div class="hint" id="jcst">在彈出視窗按「Connect Joy-Con」配對。位置仍由相機,朝向由 Joy-Con。</div>
+    </div>
+    <div class="sec">
       <h4>Scale / feel</h4>
       <div class="row"><label>scaleX</label><input type="range" id="sx" min="0.2" max="5" step="0.1"><span class="v" id="sxv"></span></div>
       <div class="row"><label>scaleY</label><input type="range" id="sy" min="0.2" max="4" step="0.1"><span class="v" id="syv"></span></div>
@@ -264,6 +339,7 @@
       <details>
         <summary>advanced</summary>
         <div class="row" style="margin-top:6px"><label>planeZ</label><input type="range" id="pz" min="-1.5" max="0" step="0.05"><span class="v" id="pzv"></span></div>
+        <div class="row"><label>depth</label><input type="range" id="dz" min="0" max="4" step="0.1"><span class="v" id="dzv"></span></div>
         <div class="row"><label>mirror</label><input type="checkbox" id="mir" style="margin-right:auto"></div>
       </details>
       <button class="s2" id="calib">Calibrate (4s)</button>
@@ -278,8 +354,9 @@
     els = {
       host, hd:$('hd'), bd:$('bd'), min:$('min'), dot:$('dot'), pfps:$('pfps'),
       disc:$('disc'), selR:$('selR'), selL:$('selL'), pose:$('pose'),
-      sx:$('sx'), sy:$('sy'), sm:$('sm'), oy:$('oy'), pz:$('pz'), mir:$('mir'),
-      sxv:$('sxv'), syv:$('syv'), smv:$('smv'), oyv:$('oyv'), pzv:$('pzv'),
+      jc:$('jc'), jcc:$('jcc'), jh:$('jh'), jhv:$('jhv'), jcst:$('jcst'),
+      sx:$('sx'), sy:$('sy'), sm:$('sm'), oy:$('oy'), pz:$('pz'), dz:$('dz'), mir:$('mir'),
+      sxv:$('sxv'), syv:$('syv'), smv:$('smv'), oyv:$('oyv'), pzv:$('pzv'), dzv:$('dzv'),
       test:$('test'), reset:$('reset'),
       calib:$('calib'), calst:$('calst'),
     };
@@ -295,6 +372,7 @@
     bindSlider(els.sm, els.smv, 'smoothing');
     bindSlider(els.oy, els.oyv, 'offsetY');
     bindSlider(els.pz, els.pzv, 'planeZ');
+    bindSlider(els.dz, els.dzv, 'depthScale');
     els.mir.checked = !!CFG.mirror;
     els.mir.onchange = () => { CFG.mirror = els.mir.checked; persist(); };
 
@@ -315,6 +393,12 @@
     // pose toggle
     els.pose.onclick = () => { state.poseEnabled ? poseStop() : poseStart(); };
 
+    // joy-con
+    els.jc.onclick = () => { state.jcEnabled ? jcStop() : jcStart(); };
+    els.jcc.onclick = () => jcRecenter();
+    els.jh.value = CFG.jcHitThresh; els.jhv.textContent = CFG.jcHitThresh;
+    els.jh.oninput = () => { CFG.jcHitThresh = +els.jh.value; els.jhv.textContent = els.jh.value; persist(); };
+
     // calibrate
     els.calib.onclick = () => calibrate(4);
 
@@ -328,7 +412,9 @@
       state.bound = { Left:null, Right:null };
       bindSlider(els.sx, els.sxv, 'scaleX'); bindSlider(els.sy, els.syv, 'scaleY');
       bindSlider(els.sm, els.smv, 'smoothing'); bindSlider(els.oy, els.oyv, 'offsetY');
-      bindSlider(els.pz, els.pzv, 'planeZ'); els.mir.checked = !!CFG.mirror;
+      bindSlider(els.pz, els.pzv, 'planeZ'); bindSlider(els.dz, els.dzv, 'depthScale');
+      els.mir.checked = !!CFG.mirror;
+      els.jh.value = CFG.jcHitThresh; els.jhv.textContent = CFG.jcHitThresh;
       refreshSelects(); persist();
     };
 
@@ -373,6 +459,12 @@
       els.pfps.textContent = state.poseCount + '/s';
       els.dot.classList.toggle('on', state.poseCount > 0);
       state.poseCount = 0;
+      // live Joy-Con line (only once we've actually seen a controller)
+      if (els.jcst && (state.jc.Left || state.jc.Right)) {
+        const fmt = (c) => (c ? `${c.side[0]} ${Math.round(c.gyroMag)}°/s` : '');
+        const txt = [fmt(state.jc.Left), fmt(state.jc.Right)].filter(Boolean).join('   ');
+        if (txt) els.jcst.textContent = txt + (state.jcEnabled ? '  ▸ writing' : '');
+      }
     }, 1000);
   }
 
@@ -392,6 +484,10 @@
     if (!els.pose) return;
     els.pose.textContent = state.poseEnabled ? 'Stop pose' : 'Start pose';
     els.pose.classList.toggle('on', state.poseEnabled);
+    if (els.jc) {
+      els.jc.textContent = state.jcEnabled ? 'Stop rotation' : 'Apply rotation';
+      els.jc.classList.toggle('on', state.jcEnabled);
+    }
   }
   function syncScaleSliders() {
     if (!els.sx) return;
@@ -401,6 +497,7 @@
 
   window.__mr = {
     cfg: CFG, discover, test, poseStart, poseStop, setSelectors, calibrate,
+    jcStart, jcStop, jcRecenter,
     panel: buildPanel, _state: state,
   };
 

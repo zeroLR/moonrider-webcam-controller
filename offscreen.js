@@ -62,14 +62,15 @@ function loop() {
 
   const now = performance.now();
   const res = pl.detectForVideo(video, now);
-  const pose = res.landmarks?.[0] || null; // 33 normalized points, or null
+  const pose = res.landmarks?.[0] || null;        // 33 normalized image points, or null
+  const world = res.worldLandmarks?.[0] || null;  // same 33 points, metric, hip-origin
 
   frameTimes.push(now);
   while (frameTimes.length && now - frameTimes[0] > 1000) frameTimes.shift();
   const fps = frameTimes.length;
 
   draw(pose);
-  const stats = analyze(pose);
+  const stats = analyze(pose, world);
   if (now - lastHudPaint > 100) { paintHud(fps, pose, stats); lastHudPaint = now; }
 
   // Build the POSE payload. Side is fixed by landmark index — never reclassified.
@@ -78,7 +79,13 @@ function loop() {
     const add = (wi, ii, side) => {
       const w = pose[wi];
       if (!w || (w.visibility ?? 1) < VIS_MIN) return; // drop unreliable wrist
-      hands.push({ handedness: side, wrist: w, indexMcp: pose[ii] || w, middleMcp: w, t: now });
+      // worldLandmarks z = metric depth (hip-origin); the real depth source, so
+      // content-main no longer has to fake it from apparent hand size.
+      const ww = world ? world[wi] : null;
+      hands.push({
+        handedness: side, wrist: w, indexMcp: pose[ii] || w, middleMcp: w,
+        wz: ww && Number.isFinite(ww.z) ? ww.z : undefined, t: now,
+      });
     };
     add(15, 19, 'Left');   // person's left wrist  -> left controller
     add(16, 20, 'Right');  // person's right wrist -> right controller
@@ -117,7 +124,7 @@ function draw(pose) {
   }
 }
 
-function analyze(pose) {
+function analyze(pose, world) {
   if (!pose) { dropFrames++; return {}; }
   const out = {};
   for (const [i, side] of [[15, 'Left'], [16, 'Right']]) {
@@ -127,7 +134,8 @@ function analyze(pose) {
     const prev = lastWrist[side];
     const d = prev ? Math.hypot(p.x - prev.x, p.y - prev.y) : 0;
     if (d > 0.08) jumpFrames++;
-    out[side] = { x: p.x, y: p.y, vis, d, active: vis >= VIS_MIN };
+    const wz = world && world[i] ? world[i].z : undefined;
+    out[side] = { x: p.x, y: p.y, vis, d, active: vis >= VIS_MIN, wz };
     lastWrist[side] = { x: p.x, y: p.y };
   }
   return out;
@@ -145,8 +153,9 @@ function paintHud(fps, pose, stats) {
     const vCls = j.vis >= 0.7 ? 'ok' : j.vis >= VIS_MIN ? 'warn' : 'bad';
     const dCls = j.d > 0.08 ? 'bad' : j.d > 0.03 ? 'warn' : 'ok';
     const tag = j.active ? '' : ' <span class="bad">(dropped)</span>';
+    const zStr = Number.isFinite(j.wz) ? `  z ${j.wz.toFixed(2)}m` : '';
     L.push(`${side.padEnd(5)} vis <span class="${vCls}">${j.vis.toFixed(2)}</span>  `
-         + `norm(${j.x.toFixed(3)}, ${j.y.toFixed(3)})  `
+         + `norm(${j.x.toFixed(3)}, ${j.y.toFixed(3)})${zStr}  `
          + `Δ <span class="${dCls}">${(j.d * 640) | 0}px</span>${tag}`);
   }
   L.push('<span class="dim">─────────────────────────────</span>');
