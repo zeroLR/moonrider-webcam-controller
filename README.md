@@ -82,7 +82,8 @@ The whole point: separate "can I move the in-game controllers?" from
 2. Play Punch Mode; move your hands.
 ✅ Pass: controllers follow your hands and crush stars.
 🔧 Tuning knobs on `__mr.cfg`: `scaleX/scaleY/offsetY/planeZ` (reach & height),
-   `mirror` (selfie flip), `smoothing` (jitter vs latency).
+   `depthScale` (in/out reach from worldLandmarks z; 0 = flat), `mirror` (selfie
+   flip), `smoothing` (jitter vs latency).
 
 ## Stage 4 — Joy-Con orientation (WebHID, no camera needed)
 The camera is great at *position* but weak at *direction* and *hit timing*. A
@@ -121,9 +122,11 @@ the cost of page-origin camera permission + CSP wasm-load handling).
 - **Classic Mode** needs slice *direction* (wrist roll) — unreliable from a
   single camera, but solid from a **Joy-Con IMU** (Stage 4). Start with Punch
   Mode on the camera alone; add a Joy-Con when you want direction.
-- **Depth** is faked from hand size; punches in/out feel approximate. The next
-  step here is to use the PoseLandmarker `worldLandmarks` wrist *z* (metric, hip-
-  origin) instead of a second model — keeps the GPU/CPU budget low.
+- **Depth** now comes from the PoseLandmarker `worldLandmarks` wrist *z* (metric,
+  hip-origin) — same model, no extra GPU/CPU cost. Tune with the **depth** slider
+  (0 = flat plane). The old hand-size estimate stays only as a fallback when
+  worldLandmarks are missing. World-z is noisier than x/y, so lean on `smoothing`;
+  the offscreen HUD prints `z …m` per wrist to tune against.
 - **Joy-Con yaw drifts** (no magnetometer); pitch/roll are gravity-corrected.
   Re-center fixes it. Absolute position is *not* available from the IMU — that's
   why we keep position on the camera and only take orientation from the Joy-Con.

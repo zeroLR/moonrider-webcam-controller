@@ -13,6 +13,7 @@
     scaleY: 0.8,
     offsetY: 1.1,
     planeZ: -0.6,
+    depthScale: 1.5, // world-z (m) -> z reach; 0 disables depth (flat plane)
     mirror: true,
     smoothing: 0.4,
     jcHitThresh: 700, // deg/s angular-velocity spike that counts as a punch/slice
@@ -43,7 +44,7 @@
 
   // ---- persistence (page-origin localStorage; fine in a real extension) ----
   const LS_KEY = '__mr_cfg_v1';
-  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','mirror','smoothing','jcHitThresh'];
+  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','depthScale','mirror','smoothing','jcHitThresh'];
   function persist() {
     try {
       const o = {};
@@ -129,7 +130,13 @@
     const x = (nx - 0.5) * CFG.scaleX;
     const y = (0.5 - ny) * CFG.scaleY + CFG.offsetY;
     let z = CFG.planeZ;
-    if (hand.wrist && hand.indexMcp) {
+    if (Number.isFinite(hand.wz)) {
+      // Real depth: PoseLandmarker worldLandmarks wrist z (metres, hip-origin).
+      // Reaching toward the camera makes wz more negative, so -wz grows as you
+      // punch forward; depthScale maps that to z reach off the neutral plane.
+      z = CFG.planeZ + (-hand.wz) * CFG.depthScale;
+    } else if (hand.wrist && hand.indexMcp) {
+      // Fallback only if worldLandmarks are absent: fake depth from hand size.
       const span = Math.hypot(hand.wrist.x - hand.indexMcp.x, hand.wrist.y - hand.indexMcp.y);
       z = CFG.planeZ + (span - 0.12) * 1.5;
     }
@@ -332,6 +339,7 @@
       <details>
         <summary>advanced</summary>
         <div class="row" style="margin-top:6px"><label>planeZ</label><input type="range" id="pz" min="-1.5" max="0" step="0.05"><span class="v" id="pzv"></span></div>
+        <div class="row"><label>depth</label><input type="range" id="dz" min="0" max="4" step="0.1"><span class="v" id="dzv"></span></div>
         <div class="row"><label>mirror</label><input type="checkbox" id="mir" style="margin-right:auto"></div>
       </details>
       <button class="s2" id="calib">Calibrate (4s)</button>
@@ -347,8 +355,8 @@
       host, hd:$('hd'), bd:$('bd'), min:$('min'), dot:$('dot'), pfps:$('pfps'),
       disc:$('disc'), selR:$('selR'), selL:$('selL'), pose:$('pose'),
       jc:$('jc'), jcc:$('jcc'), jh:$('jh'), jhv:$('jhv'), jcst:$('jcst'),
-      sx:$('sx'), sy:$('sy'), sm:$('sm'), oy:$('oy'), pz:$('pz'), mir:$('mir'),
-      sxv:$('sxv'), syv:$('syv'), smv:$('smv'), oyv:$('oyv'), pzv:$('pzv'),
+      sx:$('sx'), sy:$('sy'), sm:$('sm'), oy:$('oy'), pz:$('pz'), dz:$('dz'), mir:$('mir'),
+      sxv:$('sxv'), syv:$('syv'), smv:$('smv'), oyv:$('oyv'), pzv:$('pzv'), dzv:$('dzv'),
       test:$('test'), reset:$('reset'),
       calib:$('calib'), calst:$('calst'),
     };
@@ -364,6 +372,7 @@
     bindSlider(els.sm, els.smv, 'smoothing');
     bindSlider(els.oy, els.oyv, 'offsetY');
     bindSlider(els.pz, els.pzv, 'planeZ');
+    bindSlider(els.dz, els.dzv, 'depthScale');
     els.mir.checked = !!CFG.mirror;
     els.mir.onchange = () => { CFG.mirror = els.mir.checked; persist(); };
 
@@ -403,7 +412,8 @@
       state.bound = { Left:null, Right:null };
       bindSlider(els.sx, els.sxv, 'scaleX'); bindSlider(els.sy, els.syv, 'scaleY');
       bindSlider(els.sm, els.smv, 'smoothing'); bindSlider(els.oy, els.oyv, 'offsetY');
-      bindSlider(els.pz, els.pzv, 'planeZ'); els.mir.checked = !!CFG.mirror;
+      bindSlider(els.pz, els.pzv, 'planeZ'); bindSlider(els.dz, els.dzv, 'depthScale');
+      els.mir.checked = !!CFG.mirror;
       els.jh.value = CFG.jcHitThresh; els.jhv.textContent = CFG.jcHitThresh;
       refreshSelects(); persist();
     };
