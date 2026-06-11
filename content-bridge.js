@@ -6,5 +6,13 @@
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'POSE') {
     window.dispatchEvent(new CustomEvent('moonrider:pose', { detail: msg.hands }));
+  } else if (msg?.type === 'JOYCON') {
+    window.dispatchEvent(new CustomEvent('moonrider:joycon', { detail: msg.controller }));
   }
+});
+
+// Reverse path: MAIN world can't touch chrome.runtime, so it asks for rumble via
+// a DOM event; we forward it as a runtime message the popup (joy-con owner) hears.
+window.addEventListener('moonrider:rumble', (e) => {
+  chrome.runtime.sendMessage({ type: 'RUMBLE', side: e.detail?.side || null });
 });

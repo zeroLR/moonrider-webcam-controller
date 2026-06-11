@@ -36,7 +36,9 @@ chrome.windows.onRemoved.addListener((id) => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'POSE' && targetTabId != null) {
+  // Camera pose and Joy-Con input both flow popup -> here -> game tab. (RUMBLE
+  // goes the other way and is handled directly by the popup, not relayed here.)
+  if ((msg?.type === 'POSE' || msg?.type === 'JOYCON') && targetTabId != null) {
     chrome.tabs.sendMessage(targetTabId, msg).catch(() => {});
   }
 });

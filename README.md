@@ -9,9 +9,10 @@ coordinate mapping and the entity selectors are meant to be tuned by you.
 ```
 manifest.json        MV3 manifest (MAIN + ISOLATED content scripts, offscreen)
 background.js        service worker: offscreen lifecycle + POSE relay
-offscreen.html/js    camera + MediaPipe HandLandmarker (extension origin)
-content-bridge.js    ISOLATED world: runtime msg -> window CustomEvent
-content-main.js      MAIN world: discover / sine-test / pose->entity  (window.__mr)
+offscreen.html/js    camera + MediaPipe PoseLandmarker (extension origin)
+joycon.js            WebHID Joy-Con reader (runs in the same popup window)
+content-bridge.js    ISOLATED world: runtime msg -> window CustomEvent (both ways)
+content-main.js      MAIN world: discover / sine-test / pose->position / joycon->rotation  (window.__mr)
 vendor/tasks-vision  MediaPipe ESM bundle + wasm (already vendored)
 vendor/models        <-- you must drop hand_landmarker.task here
 ```
@@ -83,6 +84,29 @@ The whole point: separate "can I move the in-game controllers?" from
 🔧 Tuning knobs on `__mr.cfg`: `scaleX/scaleY/offsetY/planeZ` (reach & height),
    `mirror` (selfie flip), `smoothing` (jitter vs latency).
 
+## Stage 4 — Joy-Con orientation (WebHID, no camera needed)
+The camera is great at *position* but weak at *direction* and *hit timing*. A
+Joy-Con's IMU fills exactly that gap: ~60 Hz, zero inference latency, and L/R are
+separate HID devices so sides never swap. Position stays with the camera; the
+Joy-Con writes `object3D.quaternion` and fires hits off angular-velocity spikes.
+
+1. **Pair first (OS level):** hold the Joy-Con's side **sync** button until the
+   lights run, and pair it in your computer's Bluetooth settings.
+2. Click the toolbar icon to open the popup window (same one that runs the
+   camera — WebHID needs that extension-origin secure context + a user gesture).
+3. In the popup, click **Connect Joy-Con** and pick it in the chooser. Connect
+   the second one the same way. Granted devices auto-reconnect next time.
+   ✅ The popup shows `gyro …°/s` ticking as you wave it.
+4. On the game tab, bind controllers (Stage 0), then in the panel's **Joy-Con**
+   section click **Apply rotation**. Hold both Joy-Cons pointing forward and hit
+   **Re-center** to zero the orientation (yaw has no magnetometer, so re-center
+   whenever it drifts). Console equivalents: `__mr.jcStart()`, `__mr.jcRecenter()`.
+✅ Pass: the in-game controllers tilt/roll with your wrists, and a sharp swing
+   buzzes the Joy-Con (`hit °/s` slider tunes the threshold).
+🔧 Notes: the IMU frame is the sensor's own — Re-center folds out the offset; if
+   an axis feels mirrored, that's the L/R mount difference (tune downstream). Yaw
+   drift is expected. Rumble is best-effort and won't break the input path.
+
 ## Measuring latency (do this — rhythm games are latency-sensitive)
 Stamp time at three points and diff:
 - capture: `t` already on each hand object from offscreen.
@@ -95,6 +119,12 @@ the cost of page-origin camera permission + CSP wasm-load handling).
 
 ## Known limits
 - **Classic Mode** needs slice *direction* (wrist roll) — unreliable from a
-  single camera. Start with Punch Mode; add direction later if at all.
-- **Depth** is faked from hand size; punches in/out will feel approximate.
+  single camera, but solid from a **Joy-Con IMU** (Stage 4). Start with Punch
+  Mode on the camera alone; add a Joy-Con when you want direction.
+- **Depth** is faked from hand size; punches in/out feel approximate. The next
+  step here is to use the PoseLandmarker `worldLandmarks` wrist *z* (metric, hip-
+  origin) instead of a second model — keeps the GPU/CPU budget low.
+- **Joy-Con yaw drifts** (no magnetometer); pitch/roll are gravity-corrected.
+  Re-center fixes it. Absolute position is *not* available from the IMU — that's
+  why we keep position on the camera and only take orientation from the Joy-Con.
 - If `delegate:'GPU'` errors in offscreen, change it to `'CPU'` in offscreen.js.
