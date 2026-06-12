@@ -99,14 +99,26 @@ Joy-Con writes `object3D.quaternion` and fires hits off angular-velocity spikes.
    the second one the same way. Granted devices auto-reconnect next time.
    ✅ The popup shows `gyro …°/s` ticking as you wave it.
 4. On the game tab, bind controllers (Stage 0), then in the panel's **Joy-Con**
-   section click **Apply rotation**. Hold both Joy-Cons pointing forward and hit
-   **Re-center** to zero the orientation (yaw has no magnetometer, so re-center
-   whenever it drifts). Console equivalents: `__mr.jcStart()`, `__mr.jcRecenter()`.
-✅ Pass: the in-game controllers tilt/roll with your wrists, and a sharp swing
-   buzzes the Joy-Con (`hit °/s` slider tunes the threshold).
-🔧 Notes: the IMU frame is the sensor's own — Re-center folds out the offset; if
-   an axis feels mirrored, that's the L/R mount difference (tune downstream). Yaw
-   drift is expected. Rumble is best-effort and won't break the input path.
+   section click **Apply rotation**. Hold the Joy-Con **horizontal and pointing
+   at the screen**, then hit **Re-center** — that pose becomes the saber's
+   "forward". Console equivalents: `__mr.jcStart()`, `__mr.jcRecenter()`.
+✅ Pass: from the re-centred pose, a wrist **twist** rolls the saber about its
+   own blade (no wandering), tilting up/down pitches it up/down, and turning
+   left/right yaws it left/right. A sharp swing buzzes the Joy-Con.
+
+🔧 How the orientation is built (`__mr.cfg`):
+- **yaw fix** (`jcYawLeak`, default 0.03): the IMU has no magnetometer, so the
+  heading (yaw about vertical) drifts — this is the "saber wanders when I just
+  twist" problem. A yaw high-pass cancels the *slow* drift while letting *fast*
+  left/right swings through. Bigger = pulls back harder; `0` = raw (will drift).
+- **remap** (`jcRemap`, default on): maps the gravity-aligned IMU frame to the
+  game frame (z forward, y up). With it on + a good re-center, twist→roll and the
+  swing axes line up. Turn off to see the raw sensor frame.
+- **flip fwd** (`jcFlipForward`): 180° about up — flip if the saber points *away*
+  from the stars instead of toward them.
+- These are tuned blind (no hardware here): if a single axis feels mirrored,
+  toggle remap/flip or tell me which axis and I'll adjust the frame constant.
+  Rumble is best-effort and never breaks the input path.
 
 ## Measuring latency (do this — rhythm games are latency-sensitive)
 Stamp time at three points and diff:
@@ -128,6 +140,7 @@ the cost of page-origin camera permission + CSP wasm-load handling).
   worldLandmarks are missing. World-z is noisier than x/y, so lean on `smoothing`;
   the offscreen HUD prints `z …m` per wrist to tune against.
 - **Joy-Con yaw drifts** (no magnetometer); pitch/roll are gravity-corrected.
-  Re-center fixes it. Absolute position is *not* available from the IMU — that's
+  The **yaw fix** high-pass cancels the slow drift (keeps fast swings); Re-center
+  resets the neutral. Absolute position is *not* available from the IMU — that's
   why we keep position on the camera and only take orientation from the Joy-Con.
 - If `delegate:'GPU'` errors in offscreen, change it to `'CPU'` in offscreen.js.

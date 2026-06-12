@@ -17,6 +17,9 @@
     mirror: true,
     smoothing: 0.4,
     jcHitThresh: 700, // deg/s angular-velocity spike that counts as a punch/slice
+    jcYawLeak: 0.03,  // yaw drift high-pass: 0 = off; bigger = pulls heading back faster
+    jcRemap: true,    // map gravity-aligned IMU frame -> game frame (z fwd, y up)
+    jcFlipForward: false, // 180° if the blade points back instead of forward
     log: false,
   };
   const CFG = { ...DEFAULTS };
@@ -32,7 +35,9 @@
     calib: null,
     // ---- Joy-Con ----
     jcEnabled: false,                       // write orientation to entities
-    jcRecenter: { Left: null, Right: null },// inverse-of-reference offset quat
+    jcRecenter: { Left: null, Right: null },// conj(neutral) — world-relative offset
+    jcYawRef: { Left: 0, Right: 0 },        // slow-tracked heading (drift estimate)
+    jcQy: { Left: null, Right: null },      // latest yaw-stabilised quat (for recenter)
     jcLastHit: { Left: 0, Right: 0 },       // debounce timestamps
     jc: { Left: null, Right: null },        // latest controller snapshot (status)
   };
@@ -44,7 +49,7 @@
 
   // ---- persistence (page-origin localStorage; fine in a real extension) ----
   const LS_KEY = '__mr_cfg_v1';
-  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','depthScale','mirror','smoothing','jcHitThresh'];
+  const PERSIST = ['selectorRight','selectorLeft','scaleX','scaleY','offsetY','planeZ','depthScale','mirror','smoothing','jcHitThresh','jcYawLeak','jcRemap','jcFlipForward'];
   function persist() {
     try {
       const o = {};
@@ -172,6 +177,18 @@
   // Position stays with the camera; the Joy-Con owns orientation (object3D.
   // quaternion) and hit timing (angular-velocity spike). L/R are separate HID
   // devices, so sides never swap.
+  //
+  // The incoming quaternion q maps the sensor to the Madgwick world frame M,
+  // whose +z is vertical (gravity-aligned) — so pitch/roll are absolute but yaw
+  // (rotation about M.z) has no magnetometer and slowly drifts. The pipeline is:
+  //   1. yaw high-pass — subtract the slow heading so drift cancels but fast
+  //      left/right swings still pass through (that's the "亂飄" fix).
+  //   2. world-relative re-center — Δ = qy ⊗ qRef⁻¹ from your neutral pose, so
+  //      holding the controller horizontal/forward = saber identity (forward).
+  //   3. frame remap B — express that world rotation in game axes (z forward,
+  //      y up). Because step 1 pins the heading to 0, the controller's forward
+  //      axis lines up with game forward, so a wrist twist becomes a clean roll
+  //      about z (not a wandering precession).
   const quatConj = (q) => ({ x: -q.x, y: -q.y, z: -q.z, w: q.w });
   function quatMul(a, b) {
     return {
@@ -181,11 +198,33 @@
       w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
     };
   }
-  function applyRotation(side, q) {
+  // B: Madgwick frame (z up) -> game frame (y up, -z forward). M.x->-z, M.z->y.
+  const B = { x: -0.5, y: 0.5, z: 0.5, w: 0.5 };
+  const B_INV = quatConj(B);
+  const FLIP_FWD = { x: 0, y: 1, z: 0, w: 0 }; // 180° about game-up (y)
+
+  // Remove the slow component of the heading (yaw about vertical M.z). Fast
+  // swings outrun the leak and pass; drift gets absorbed into jcYawRef.
+  function yawStabilize(side, q) {
+    const heading = 2 * Math.atan2(q.z, q.w); // twist of q about M.z
+    let ref = state.jcYawRef[side] || 0;
+    let d = heading - ref;
+    d = Math.atan2(Math.sin(d), Math.cos(d)); // shortest angular path
+    ref += d * CFG.jcYawLeak;
+    state.jcYawRef[side] = ref;
+    const h = -ref / 2;
+    const rz = { x: 0, y: 0, z: Math.sin(h), w: Math.cos(h) };
+    return quatMul(rz, q); // left-multiply: cancel drift in the world frame
+  }
+  function applyRotation(side, qRaw) {
     const el = getTarget(side);
     if (!el || !el.object3D) return false;
+    const qy = CFG.jcYawLeak > 0 ? yawStabilize(side, qRaw) : qRaw;
+    state.jcQy[side] = qy;
     const off = state.jcRecenter[side];
-    const r = off ? quatMul(off, q) : q; // relative to the re-center reference
+    let r = off ? quatMul(qy, off) : qy; // world-relative to neutral (Δ = qy ⊗ qRef⁻¹)
+    if (CFG.jcRemap) r = quatMul(quatMul(B, r), B_INV);
+    if (CFG.jcFlipForward) r = quatMul(FLIP_FWD, r);
     if (![r.x, r.y, r.z, r.w].every(Number.isFinite)) return false;
     el.object3D.quaternion.set(r.x, r.y, r.z, r.w);
     return true;
@@ -213,13 +252,14 @@
 
   function jcStart() { state.jcEnabled = true; syncPanel(); }
   function jcStop() { state.jcEnabled = false; syncPanel(); }
-  // Capture the current pose of each connected Joy-Con as "forward" — folds out
-  // the gravity/yaw frame difference so the controllers point where you expect.
+  // Capture the current (yaw-stabilised) pose as "forward". Hold the Joy-Con
+  // horizontal and pointing at the screen, then call this: that pose becomes the
+  // saber's identity, so twist=roll/up=up/left=left all line up from there.
   function jcRecenter(side) {
     const sides = side ? [side] : ['Left', 'Right'];
     for (const s of sides) {
-      const c = state.jc[s];
-      if (c && c.q) state.jcRecenter[s] = quatConj(c.q);
+      const q = state.jcQy[s] || (state.jc[s] && state.jc[s].q);
+      if (q) state.jcRecenter[s] = quatConj(q);
     }
     if (els.jcst) els.jcst.textContent = '已重設朝向基準 ✓';
   }
@@ -328,7 +368,9 @@
       <h4>Joy-Con (rotation)</h4>
       <div class="btns"><button class="toggle" id="jc">Apply rotation</button><button class="s2" id="jcc">Re-center</button></div>
       <div class="row"><label>hit °/s</label><input type="range" id="jh" min="200" max="2000" step="50"><span class="v" id="jhv"></span></div>
-      <div class="hint" id="jcst">在彈出視窗按「Connect Joy-Con」配對。位置仍由相機,朝向由 Joy-Con。</div>
+      <div class="row"><label>yaw fix</label><input type="range" id="jy" min="0" max="0.2" step="0.01"><span class="v" id="jyv"></span></div>
+      <div class="row"><label>remap</label><input type="checkbox" id="jrm"><label style="width:auto;margin-left:8px">flip fwd</label><input type="checkbox" id="jff" style="margin-right:auto"></div>
+      <div class="hint" id="jcst">水平握住、指向螢幕,按 Re-center。yaw fix 治漂移;遠端無法驗證軸向,軸反了就調 remap/flip。</div>
     </div>
     <div class="sec">
       <h4>Scale / feel</h4>
@@ -355,6 +397,7 @@
       host, hd:$('hd'), bd:$('bd'), min:$('min'), dot:$('dot'), pfps:$('pfps'),
       disc:$('disc'), selR:$('selR'), selL:$('selL'), pose:$('pose'),
       jc:$('jc'), jcc:$('jcc'), jh:$('jh'), jhv:$('jhv'), jcst:$('jcst'),
+      jy:$('jy'), jyv:$('jyv'), jrm:$('jrm'), jff:$('jff'),
       sx:$('sx'), sy:$('sy'), sm:$('sm'), oy:$('oy'), pz:$('pz'), dz:$('dz'), mir:$('mir'),
       sxv:$('sxv'), syv:$('syv'), smv:$('smv'), oyv:$('oyv'), pzv:$('pzv'), dzv:$('dzv'),
       test:$('test'), reset:$('reset'),
@@ -398,6 +441,12 @@
     els.jcc.onclick = () => jcRecenter();
     els.jh.value = CFG.jcHitThresh; els.jhv.textContent = CFG.jcHitThresh;
     els.jh.oninput = () => { CFG.jcHitThresh = +els.jh.value; els.jhv.textContent = els.jh.value; persist(); };
+    els.jy.value = CFG.jcYawLeak; els.jyv.textContent = (+CFG.jcYawLeak).toFixed(2);
+    els.jy.oninput = () => { CFG.jcYawLeak = +els.jy.value; els.jyv.textContent = (+els.jy.value).toFixed(2); persist(); };
+    els.jrm.checked = !!CFG.jcRemap;
+    els.jrm.onchange = () => { CFG.jcRemap = els.jrm.checked; persist(); };
+    els.jff.checked = !!CFG.jcFlipForward;
+    els.jff.onchange = () => { CFG.jcFlipForward = els.jff.checked; persist(); };
 
     // calibrate
     els.calib.onclick = () => calibrate(4);
@@ -415,6 +464,8 @@
       bindSlider(els.pz, els.pzv, 'planeZ'); bindSlider(els.dz, els.dzv, 'depthScale');
       els.mir.checked = !!CFG.mirror;
       els.jh.value = CFG.jcHitThresh; els.jhv.textContent = CFG.jcHitThresh;
+      els.jy.value = CFG.jcYawLeak; els.jyv.textContent = (+CFG.jcYawLeak).toFixed(2);
+      els.jrm.checked = !!CFG.jcRemap; els.jff.checked = !!CFG.jcFlipForward;
       refreshSelects(); persist();
     };
 
